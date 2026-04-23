@@ -33,6 +33,7 @@ class TrajectoryCollectorWrapper(gym.Wrapper):
         self.episode_count = 0
         self.roadgraph = self._extract_roadgraph()
         self.current_step = 0
+        self.last_episode_data = None
 
     def reset(self, **kwargs):
         # Save previous episode if data exists
@@ -59,6 +60,7 @@ class TrajectoryCollectorWrapper(gym.Wrapper):
             # Auto-save based on duration to prevent memory bloat in infinite envs
             env_duration = self.env.unwrapped.config.get("duration", 200)
             if self.current_step >= env_duration:
+                self.last_episode_data = self.get_episode_data()
                 self.save_episode()
                 self.episode_trajectories = {}
                 self.current_step = 0
@@ -139,6 +141,7 @@ class TrajectoryCollectorWrapper(gym.Wrapper):
                 "num_agents": len(self.episode_trajectories)
             }
         }
+        self.last_episode_data = save_dict
 
         if self.save_format == "pkl":
             path = os.path.join(self.output_dir, f"{filename}.pkl")
@@ -156,7 +159,21 @@ class TrajectoryCollectorWrapper(gym.Wrapper):
             pd.DataFrame(rows).to_csv(path, index=False)
             print(f"DEBUG: Saved CSV Episode {self.episode_count} to {path}")
 
+    def get_episode_data(self) -> Dict[str, Any]:
+        """Returns the current episode trajectories and roadgraph."""
+        if not self.episode_trajectories and self.last_episode_data:
+            return self.last_episode_data
+            
+        return {
+            "roadgraph": self.roadgraph,
+            "agents": self.episode_trajectories,
+            "metadata": {
+                "env_config": self.env.unwrapped.config,
+                "episode": self.episode_count,
+                "total_steps": self.current_step,
+                "num_agents": len(self.episode_trajectories)
+            }
+        }
+
     def close(self):
-        if self.episode_trajectories:
-            self.save_episode()
         super().close()

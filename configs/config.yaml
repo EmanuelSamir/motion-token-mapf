@@ -5,6 +5,8 @@ defaults:
   - data: highway
   - trainer: default
 
+max_agents: 20
+
 seed: 42
 num_episodes: 5
 render: true

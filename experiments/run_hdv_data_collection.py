@@ -40,59 +40,59 @@ def main(cfg: DictConfig):
     # 2. Initialize Environment
     raw_env = MergeInteractionEnv(env_config, render_mode=render_mode)
     
-    # 3. Wrap with Trajectory Collector
-    # We use the 'tag' from config to name the subdirectory
+    # 3. Setup Collectors
     dataset_tag = cfg.get("tag", "hdv_raw_collection")
     output_dir = os.path.join("data/trajectories", dataset_tag)
+    
+    from src.data.hf_writer import HFDatasetWriter
+    hf_writer = HFDatasetWriter(cfg)
     
     env = TrajectoryCollectorWrapper(
         raw_env, 
         output_dir=output_dir, 
-        save_format="pkl"
+        enabled=True,
+        save_format=None # We handle saving via hf_writer
     )
     
     # Set global seed
     np.random.seed(seed)
     
-    # Check if we want to randomize vehicle density
-    # Expected format: [min, max]
     vehicles_range = cfg.get("vehicles_range", None)
     
     try:
         total_steps = 0
+        total_samples = 0
         for ep in range(num_episodes):
-            # Dynamic Randomization of Traffic Density
             if vehicles_range:
                 target_count = np.random.randint(vehicles_range[0], vehicles_range[1] + 1)
                 env.unwrapped.config["target_vehicles_count"] = target_count
-                # env.unwrapped.configure({"target_vehicles_count": target_count}) # Alternative
             
             obs, info = env.reset(seed=seed + ep)
             
-            pbar = tqdm(total=duration, desc=f" Episode {ep+1}/{num_episodes} (Veh: {env.unwrapped.config['target_vehicles_count']})", unit="step")
+            pbar = tqdm(total=duration, desc=f" Episode {ep+1}/{num_episodes}", unit="step")
             
             ep_step = 0
             while ep_step < duration:
-                # HDVs are controlled internally by IDM/MOBIL
                 obs, reward, terminated, truncated, info = env.step(None)
-                
-                if render_mode == "human":
-                    env.render()
-                    time.sleep(env_config.get("step_delay", 0.01))
-                
                 ep_step += 1
                 total_steps += 1
                 pbar.update(1)
-                
                 if terminated or truncated:
                     break
-
+            
             pbar.close()
+            
+            # Direct processing to HF
+            data = env.get_episode_data()
+            num_samples = hf_writer.process_episode(data["agents"], data["roadgraph"])
+            total_samples += num_samples
+            print(f"      Finished Episode {ep+1}. Added {num_samples} samples. Total: {total_samples}")
             
     except KeyboardInterrupt:
         print("\n\n⚠️ Collection interrupted by user.")
     finally:
-        print(f"\n📊 Collection Finished. Total steps recorded: {total_steps}")
+        print(f"\n📊 Collection Finished. Total steps: {total_steps}, Total Samples: {total_samples}")
+        hf_writer.save(output_dir)
         env.close()
 
 if __name__ == "__main__":

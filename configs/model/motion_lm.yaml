@@ -4,7 +4,7 @@ num_decoder_layers: 4
 num_heads: 8
 ff_size: 1024
 vocab_size: 169
-max_agents: 10
+max_agents: ${max_agents}
 max_timesteps: 25
 lr: 0.0006
 min_lr: 0.0001

@@ -26,7 +26,7 @@ class BenchmarkSuite:
         self.cfg = cfg
         self.env_config = OmegaConf.to_container(cfg.env, resolve=True)
         self.env_config["cav_ratio"] = cfg.get("test_cav_ratio", 0.5)
-        self.env_config["target_vehicles_count"] = 20  # Sync with stress tests
+        self.env_config["target_vehicles_count"] = cfg.max_agents
 
         # Unified Render Mode: 'none', 'human', 'record'
         self.render_mode = cfg.get("test_render_mode", "none")
@@ -269,10 +269,10 @@ class BenchmarkSuite:
                         for v in env.unwrapped.road.vehicles
                         if v.position[0] < self.goal_x + 20 and not v.crashed
                     ]
-                    if name == "BK-PBS" and len(all_active) > 10:
+                    if name == "BK-PBS" and len(all_active) > self.cfg.max_agents:
                         all_active = sorted(
                             all_active, key=lambda v: v.position[0], reverse=True
-                        )[:10]
+                        )[:self.cfg.max_agents]
 
                     active_states, v_info, active_hist = {}, [], {}
                     for v in all_active:
