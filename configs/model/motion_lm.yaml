@@ -1,0 +1,15 @@
+hidden_size: 256
+num_encoder_layers: 4
+num_decoder_layers: 4
+num_heads: 8
+ff_size: 1024
+vocab_size: 169
+max_agents: 10
+max_timesteps: 25
+lr: 0.0006
+min_lr: 0.0001
+weight_decay: 0.05
+dropout: 0.1
+loss_type: ce
+focal_gamma: 2.0
+smoothing_sigma: 0.5

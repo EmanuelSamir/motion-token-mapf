@@ -1,4 +1,13 @@
 dataset-test
 google-cloud-sdk
 motion-lm
-output
+outputs
+data
+bin
+.gemini
+.hydra
+lightning_logs
+scratch
+tensorboard
+visualizations
+.DS_Store

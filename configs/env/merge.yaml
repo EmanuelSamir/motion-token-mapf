@@ -1,0 +1,53 @@
+# --- Configuración del Escenario de Mezcla (Highway-Merge) ---
+
+# Geometría de la Carretera
+highway_lanes: 2      # Número de carriles en la autopista principal
+ramp_lanes: 1         # Número de carriles en la rampa de incorporación
+ramp_distance: 100    # Distancia antes de la zona de mezcla (Mayor = rampa más larga antes de unir)
+merging_length: 100   # Longitud del carril paralelo de incorporación (Mayor = más espacio para mezclar)
+post_merge_length: 100 # Distancia después de la zona de mezcla (Mayor = más pista tras el merge)
+ramp_curve_length: 30 # Suavidad de la curva de entrada (Mayor = curva más larga y suave)
+ramp_offset: 5.0      # Separación lateral inicial rampa-autopista (Mayor = más lejos empieza la rampa)
+collision_radius: 7.0 # Radio circular de pre-chequeo para colisiones (Mínimo recomendado: 6.0)
+
+# Horizontes de Planificación (Distancia a futuro en metros)
+planning_horizon_aggressive: 70.0  # Fase 1: Meta de largo plazo
+planning_horizon_safety: 30.0       # Fase 2: Meta de seguridad (si falla Fase 1)
+
+# Simulación de Flujo Infinito
+duration: 200              # Pasos totales (Mayor = simulación más larga)
+target_vehicles_count: 10  # Densidad de tráfico (Mayor = más tráfico y congestión)
+cav_ratio: 0.3             # Mix de autonomía [0-1] (0.9 = casi todos son Robots/CAV, 0.1 = casi todos Humanos)
+spawn_gap: 35.0            # Seguridad al aparecer (Mayor = más espacio vacío entre nuevos vehículos)
+
+# Propiedades de los Vehículos
+vehicle_length: 5.0        # Largo (metros)
+vehicle_width: 2.0         # Ancho (metros)
+initial_speed_range: [10, 25]  # Velocidad al nacer (m/s)
+target_speed_range: [20, 30]   # Velocidad a la que aspiran (Mayor = tráfico más rápido)
+
+# --- Personalidad del Conductor (Randomización Granular para Motion-LM) ---
+time_wanted_range: [0.8, 2.0]     # [s] Tiempo de seguimiento (Menor = más pegado al de adelante)
+politeness_range: [0.1, 0.7]      # [0-1] Factor de cortesía (Menor = cambios de carril más egoístas)
+distance_wanted_range: [5.0, 15.0] # [m] Distancia de seguridad en parado (s0)
+min_acc_gain_range: [0.1, 0.4]    # [m/s2] Umbral para decidir cambio de carril (Menor = más inquieto)
+acc_max_range: [4.0, 6.0]         # [m/s2] Capacidad de aceleración preferida
+
+# Márgenes de Seguridad (Margen extra sobre el tamaño real del vehículo para compensar drift)
+safety_margin_l: 1.20        # Margen longitudinal extra (metros)
+safety_margin_w: 0.80        # Margen lateral extra (metros)
+
+# Visualización y Cámara (Render)
+render_mode: human    # 'human' para ver ventana, null para desactivar
+scaling: 3.5          # Zoom (Menor = ves más trozo de mapa, Mayor = ves los coches más grandes/cerca)
+centering_position: [0.5, 0.5] # Alineación en pantalla (0.5 es centro; [0.3, 0.5] lo desplazaría a la izquierda)
+fixed_camera: true    # true = cámara estática en un punto, false = la cámara sigue al vehículo ego
+debug_mode: false     # true = guarda árboles de búsqueda, frames de cada paso y auditorías CSV
+roi_center: 150       # Punto de enfoque horizontal (Mayor = la cámara mira más hacia la derecha de la pista)
+
+# Recolección de Datos (Trajectory Collector)
+collection:
+  enabled: false             # Activar para guardar trayectorias a disco
+  output_dir: "data/trajectories" # Carpeta donde se guardarán los archivos
+  save_format: "pkl"         # Formato: 'pkl' (completo para entrenamiento) o 'csv' (inspección)
+  num_episodes: 1            # Cuántos episodios recolectar antes de cerrar (usado en scripts)
