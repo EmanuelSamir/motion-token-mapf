@@ -2,7 +2,7 @@ dataset-test
 google-cloud-sdk
 motion-lm
 outputs
-data
+/data/
 bin
 .gemini
 .hydra
