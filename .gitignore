@@ -11,3 +11,7 @@ scratch
 tensorboard
 visualizations
 .DS_Store
+*.pyc
+
+.env
+checkpoints
