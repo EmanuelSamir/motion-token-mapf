@@ -14,7 +14,7 @@ class MotionLM(nn.Module):
         num_decoder_layers=4,
         num_heads=8,
         ff_size=1024,
-        vocab_size=169,
+        vocab_size=170,
         max_agents=3,
         max_timesteps=40,
         history_dim=5,
@@ -63,7 +63,7 @@ def test_motion_lm():
     seq_len = num_agents * num_timesteps
     
     model = MotionLM(
-        vocab_size=169, 
+        vocab_size=170, 
         max_agents=num_agents, 
         max_timesteps=num_timesteps,
         history_dim=5
@@ -73,7 +73,7 @@ def test_motion_lm():
     history = torch.randn(batch_size, num_agents, history_len, 5)
     
     # Fake tokens: [B, N*T]
-    motion_tokens = torch.randint(0, 169, (batch_size, seq_len))
+    motion_tokens = torch.randint(0, 170, (batch_size, seq_len))
     
     # Interleaved IDs: [A1_T1, A2_T1, A3_T1, A1_T2, ...]
     agent_ids = torch.arange(num_agents).repeat(num_timesteps).repeat(batch_size, 1)
@@ -81,7 +81,7 @@ def test_motion_lm():
     
     logits = model(history, motion_tokens, agent_ids, time_ids)
     print(f"MotionLM logits shape: {logits.shape}")
-    assert logits.shape == (batch_size, seq_len, 169), f"Wrong output shape: {logits.shape}"
+    assert logits.shape == (batch_size, seq_len, 170), f"Wrong output shape: {logits.shape}"
     print("✅ MotionLM test passed!")
 
 if __name__ == "__main__":

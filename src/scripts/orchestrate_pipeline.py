@@ -87,11 +87,12 @@ def motion_lm_pipeline(num_episodes: int = 1000, max_steps: int = 150000):
     print(f"🚀 Iniciando Pipeline de Producción en: {BASE_DIR}")
 
     # Generar un tag único para esta ejecución
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tag = f"run_{timestamp}"
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # tag = f"run_{timestamp}"
+    tag = "run_20260423_015507"
 
     # Ejecución secuencial de todas las fases
-    collect_data(num_episodes, tag)
+    # collect_data(num_episodes, tag)
     train_model(tag, max_steps)
     best_model = find_best_checkpoint()
     run_benchmark(best_model)

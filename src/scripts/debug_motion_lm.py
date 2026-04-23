@@ -58,7 +58,8 @@ class SyntheticInteractionDataset(Dataset):
                 h = trajs[n, :self.history_len].copy()
                 f = trajs[n, self.history_len-1:, :2].copy()
                 ref = h[-1, :2].copy()
-                idelta = (h[-1, :2] - h[-2, :2]).copy()
+                # Use recorded velocity [vx, vy] * dt directly
+                idelta = h[-1, 2:4] * 0.2
                 h[:, :2] -= ref; f -= ref
                 hists.append(h); tokens.append(self.tokenizer.tokenize_trajectory(f, initial_delta=idelta))
                 init_deltas.append(idelta)
@@ -87,7 +88,7 @@ def evaluate_and_viz(model, dataset, tokenizer, device):
     scenarios = ["1: Constant", "2: Braking", "3: Cut-in", "4: Swerve"]
     ade_sums = [0]*4; fde_sums = [0]*4; counts = [0]*4
     fig, axes = plt.subplots(4, 1, figsize=(12, 14))
-    N, T, START_TOKEN = 3, 20, 169
+    N, T, START_TOKEN = 3, 20, 84
 
     for idx in range(min(100, len(dataset))): # More eval samples for stability
         s = dataset.data[idx]
@@ -130,7 +131,7 @@ def train_debug():
     model = MotionLM(max_agents=3, max_timesteps=20, vocab_size=170).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-4) # Stable LR
     criterion = nn.CrossEntropyLoss()
-    START_TOKEN = 169
+    START_TOKEN = 84
     
     print(f"🌀 Training for 60 epochs (Unique Signature Data)... Device: {device}")
     for epoch in range(60):

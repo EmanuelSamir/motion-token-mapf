@@ -7,6 +7,6 @@ train_val_split: 0.9
 num_workers: 4
 max_delta: 18.0
 bins_per_axis: 13
-vocab_size: 169
+vocab_size: 170
 use_hf: true
 hf_path: data/trajectories/hdv_1000_ep_hf

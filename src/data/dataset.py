@@ -32,7 +32,7 @@ class TrajectoryDataset(Dataset):
         self.stride = stride
         self.sample_ratio = sample_ratio
         self.stationary_keep_ratio = stationary_keep_ratio
-        self.INVALID_TOKEN = 170
+        self.INVALID_TOKEN = 169
         self.max_agents_per_scene = max_agents_per_scene
         
         # Unique cache name based on parameters
@@ -158,8 +158,11 @@ class TrajectoryDataset(Dataset):
             
             f_coords, f_mask = [], []
             # Reference for tokenizer (Verlet initialization)
-            p_now, p_prev = h_feats[-1, :2], h_feats[-2, :2]
-            idelta = p_now - p_prev
+            # Use recorded velocity [vx, vy] * dt directly for robustness.
+            # Assuming dt = 0.2s for HighwayEnv typically.
+            dt = 0.2
+            idelta = h_feats[-1, 2:4] * dt
+                
             init_deltas.append(idelta)
             
             for t in range(t_ref, t_ref + self.prediction_len + 1):

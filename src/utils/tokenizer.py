@@ -19,7 +19,7 @@ class MotionTokenizer:
         self.max_dd = max_delta_delta
         self.bins = np.linspace(-max_delta_delta, max_delta_delta, num_bins)
         self.vocab_size = num_bins * num_bins
-        self.INVALID_TOKEN = 170
+        self.INVALID_TOKEN = 169
         
         # Precompute all possible delta-deltas for greedy search
         self.all_dd = []

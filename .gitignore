@@ -11,6 +11,7 @@ scratch
 tensorboard
 visualizations
 .DS_Store
+__pycache__/
 *.pyc
 
 .env

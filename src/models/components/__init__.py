@@ -41,7 +41,7 @@ class TrajectoryDecoder(nn.Module):
     """
     def __init__(
         self,
-        vocab_size=169,
+        vocab_size=170,
         hidden_size=256,
         num_layers=4,
         num_heads=8,

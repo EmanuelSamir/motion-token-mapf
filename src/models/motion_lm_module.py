@@ -212,7 +212,8 @@ class MotionLMLightningModule(L.LightningModule):
         soft_targets = self.spatial_smoothing_matrix[valid_targets]
 
         # Compute Cross Entropy (KL Divergence between soft targets and log-softmax)
-        log_probs = F.log_softmax(valid_logits, dim=-1)
+        # Sliced to 169 as the smoothing matrix only covers valid motion tokens 0-168
+        log_probs = F.log_softmax(valid_logits, dim=-1)[:, :169]
         return -(soft_targets * log_probs).sum(dim=-1).mean()
 
     def focal_loss(self, logits, targets, gamma=2.0):
