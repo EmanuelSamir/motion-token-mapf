@@ -7,7 +7,6 @@ bin
 .gemini
 .hydra
 lightning_logs
-scratch
 tensorboard
 visualizations
 .DS_Store

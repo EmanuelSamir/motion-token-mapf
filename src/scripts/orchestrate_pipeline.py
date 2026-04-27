@@ -85,14 +85,17 @@ def run_benchmark(checkpoint_path: str):
 def motion_lm_pipeline(num_episodes: int = 1000, max_steps: int = 150000):
     print(f"🚀 Iniciando Pipeline de Producción en: {BASE_DIR}")
 
-    # Generar un tag único para esta ejecución
-    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # tag = f"run_{timestamp}"
+    # For this experiment with the 64-token tokenizer, we use the existing high-quality dataset
     tag = "run_20260423_015507"
 
-    # Ejecución secuencial de todas las fases
+    # 1. Collect Data (Commented out as we have the dataset ready)
     # collect_data(num_episodes, tag)
+
+    # 2. Train Model
+    # Since vocab size changed (169 -> 64), we start training from zero
     train_model(tag, max_steps)
+
+    # 3. Benchmark
     best_model = find_best_checkpoint()
     run_benchmark(best_model)
 

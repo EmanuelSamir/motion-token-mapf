@@ -33,7 +33,6 @@ def train(cfg: DictConfig):
         "num_decoder_layers": cfg.model.num_decoder_layers,
         "num_heads": cfg.model.num_heads,
         "ff_size": cfg.model.ff_size,
-        "vocab_size": 170, # Fixed for MotionTokenizer
         "max_agents": cfg.model.max_agents,
         "max_timesteps": cfg.model.max_timesteps,
         "dropout": cfg.model.get("dropout", 0.1)
