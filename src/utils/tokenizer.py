@@ -16,50 +16,67 @@ class MotionTokenizer:
     
     This ensures Token 84 (offset 0,0) has ZERO drift for constant velocity.
     """
-    def __init__(self, num_bins=13, velocity_bins=128, max_velocity_x=18.0, max_velocity_y=8.0):
-        self.num_bins = num_bins # 13
-        self.v_bins_count = velocity_bins # 128
-        self.max_v_x = max_velocity_x
-        self.max_v_y = max_velocity_y
+    def __init__(self, num_bins=None, velocity_bins=128, max_velocity_x=25.0, max_velocity_y=10.0, dt=0.2):
+        """
+        Args:
+            velocity_bins: Resolution of the velocity grid.
+            max_velocity_x: Max velocity in m/s (longitudinal).
+            max_velocity_y: Max velocity in m/s (lateral).
+            dt: Time step in seconds.
+        """
+        self.dt = dt
+        self.v_bins_count = velocity_bins 
         
-        # Velocity Grids (Asymmetric)
-        self.v_grid_x = np.linspace(-max_velocity_x, max_velocity_x, velocity_bins)
-        self.v_grid_y = np.linspace(-max_velocity_y, max_velocity_y, velocity_bins)
+        # Internal units are m/step to match dataset displacements
+        self.max_v_x_step = max_velocity_x * dt
+        self.max_v_y_step = max_velocity_y * dt
+        
+        # Velocity Grids (Symmetric in m/step)
+        self.v_grid_x = np.linspace(-self.max_v_x_step, self.max_v_x_step, velocity_bins)
+        self.v_grid_y = np.linspace(-self.max_v_y_step, self.max_v_y_step, velocity_bins)
         
         self.v_step_x = self.v_grid_x[1] - self.v_grid_x[0]
         self.v_step_y = self.v_grid_y[1] - self.v_grid_y[0]
         
-        # Acceleration Offsets (Index shifts: -6 to +6)
-        self.offset_range = num_bins // 2
-        self.offsets = np.arange(-self.offset_range, self.offset_range + 1)
+        # Optimized 2D Codebook (Index shifts on the grid)
+        # Derived via K-Means clustering on unique observed offsets.
+        self.codebook = np.array([
+            [-9, -41], [-8, -26], [-7, -28], [-7, -23], [-7, -17], [-6, -13], [-5, -18], [-4, -34], 
+            [-4, -33], [-4, -32], [-4, -26], [-4, -15], [-4, -11], [-4, -8], [-3, -19], [-3, -13], 
+            [-3, -4], [-2, -23], [-2, -20], [-2, -16], [-2, -12], [-2, -10], [-2, -8], [-2, -6], 
+            [-2, -2], [-2, 0], [-2, 2], [-2, 6], [-1, -10], [-1, -8], [-1, -4], [-1, 0], 
+            [-1, 4], [-1, 5], [-1, 9], [-1, 13], [0, -9], [0, -6], [0, -2], [0, 0], 
+            [0, 2], [0, 7], [0, 8], [0, 15], [0, 17], [0, 21], [0, 26], [1, -4], 
+            [1, -1], [1, 8], [1, 10], [2, -3], [2, 0], [2, 1], [2, 3], [2, 5], 
+            [2, 6], [2, 14], [3, -8], [3, 12], [4, 6], [4, 11], [5, 9], [6, 16]
+        ])
         
-        self.vocab_size = num_bins * num_bins
-        self.INVALID_TOKEN = 169
+        self.vocab_size = len(self.codebook)
+        self.INVALID_TOKEN = self.vocab_size
 
     def _get_velocity_bin(self, v):
-        """ Maps continuous velocity to nearest grid indices [idx_x, idx_y] """
-        idx_x = np.round((v[0] + self.max_v_x) / self.v_step_x).astype(int)
-        idx_y = np.round((v[1] + self.max_v_y) / self.v_step_y).astype(int)
+        """ 
+        Maps continuous displacement v [m/step] to nearest grid indices [idx_x, idx_y].
+        """
+        idx_x = np.round((v[0] + self.max_v_x_step) / self.v_step_x).astype(int)
+        idx_y = np.round((v[1] + self.max_v_y_step) / self.v_step_y).astype(int)
         return np.array([
             np.clip(idx_x, 0, self.v_bins_count - 1),
             np.clip(idx_y, 0, self.v_bins_count - 1)
         ])
 
-    def decode_token(self, token, prev_delta_bin_idx):
+    def decode_token(self, token, prev_v_bin_idx):
         """
-        In Paper: New_Vel_Bin = Prev_Vel_Bin + Token_Offset
+        Decodes 1D token index to a new velocity bin using the 2D codebook.
         """
         if token >= self.vocab_size:
-            return 0.0, 0.0, prev_delta_bin_idx
+            # Return same bin if invalid
+            return self.v_grid_x[prev_v_bin_idx[0]], self.v_grid_y[prev_v_bin_idx[1]], prev_v_bin_idx
             
-        off_idx_x = token // self.num_bins
-        off_idx_y = token % self.num_bins
+        offset_x, offset_y = self.codebook[token]
         
-        offset_x = self.offsets[off_idx_x]
-        offset_y = self.offsets[off_idx_y]
-        
-        new_bin_x = np.clip(prev_delta_bin_idx[0] + offset_x, 0, self.v_bins_count - 1)
-        new_bin_y = np.clip(prev_delta_bin_idx[1] + offset_y, 0, self.v_bins_count - 1)
+        new_bin_x = np.clip(prev_v_bin_idx[0] + offset_x, 0, self.v_bins_count - 1)
+        new_bin_y = np.clip(prev_v_bin_idx[1] + offset_y, 0, self.v_bins_count - 1)
         
         new_v_x = self.v_grid_x[new_bin_x]
         new_v_y = self.v_grid_y[new_bin_y]
@@ -67,6 +84,9 @@ class MotionTokenizer:
         return new_v_x, new_v_y, np.array([new_bin_x, new_bin_y])
 
     def tokenize_trajectory(self, trajectory, initial_delta):
+        """
+        initial_delta: displacement [m/step] of the first recorded segment.
+        """
         T = len(trajectory)
         if T < 2: return []
         
@@ -76,26 +96,21 @@ class MotionTokenizer:
         # Initial velocity bin
         prev_v_bin = self._get_velocity_bin(initial_delta)
         
-        # Precompute all possible candidate velocity bins [169, 2]
-        # These are constant for every step: prev_v_bin + offsets
-        ox, oy = np.meshgrid(self.offsets, self.offsets, indexing='ij')
-        token_offsets = np.stack([ox.flatten(), oy.flatten()], axis=1) # [169, 2]
-        
         tokens = []
         for t in range(1, T):
             target_pos = traj_xy[t]
             
             # Vectorized candidate bins
-            candidate_bins = np.clip(prev_v_bin + token_offsets, 0, self.v_bins_count - 1)
+            candidate_bins = np.clip(prev_v_bin + self.codebook, 0, self.v_bins_count - 1)
             
-            # Independent grids for X and Y
+            # Reconstruct candidate velocities
             candidate_v_x = self.v_grid_x[candidate_bins[:, 0]]
             candidate_v_y = self.v_grid_y[candidate_bins[:, 1]]
-            candidate_v = np.stack([candidate_v_x, candidate_v_y], axis=1) # [169, 2]
+            candidate_v = np.stack([candidate_v_x, candidate_v_y], axis=1) # [64, 2]
             
-            candidate_pos = curr_recon_pos + candidate_v # [169, 2]
+            candidate_pos = curr_recon_pos + candidate_v # [64, 2]
             
-            # Squared error [169]
+            # Closest candidate in position space
             errors = np.sum((candidate_pos - target_pos)**2, axis=1)
             best_token = np.argmin(errors)
             
@@ -112,12 +127,7 @@ class MotionTokenizer:
         prev_v_bin = self._get_velocity_bin(initial_delta)
         
         for token in tokens:
-            if token >= self.vocab_size:
-                # If invalid, treat as 'Idle' (maintain velocity) but don't stop
-                v_x, v_y, prev_v_bin = self.v_grid_x[prev_v_bin[0]], self.v_grid_y[prev_v_bin[1]], prev_v_bin
-            else:
-                v_x, v_y, prev_v_bin = self.decode_token(token, prev_v_bin)
-                
+            v_x, v_y, prev_v_bin = self.decode_token(token, prev_v_bin)
             curr_pos += np.array([v_x, v_y])
             trajectory.append(curr_pos.copy())
             
