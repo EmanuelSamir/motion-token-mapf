@@ -1,8 +1,13 @@
-max_steps: 50000
-accelerator: auto
-devices: 1
-precision: 32-true
-log_every_n_steps: 20
-val_check_interval: 500
-limit_val_batches: 0.2
-resume_from_checkpoint: null
+trainer:
+  max_epochs: 100
+  accelerator: gpu
+  devices: 1
+  precision: 32
+  log_every_n_steps: 20
+  val_check_interval: 1000
+  limit_val_batches: 0.1
+  gradient_clip_val: 2.0
+
+optimizer:
+  lr: 0.0003
+  weight_decay: 0.01

@@ -38,7 +38,6 @@ def train_model(tag: str, max_steps: int):
         "experiments/train_pl.py",
         f"data.hf_path='{dataset_path}'",
         f"++trainer.max_steps={max_steps}",
-        "model.loss_type=spatial_ce",
     ]
     subprocess.run(cmd, check=True)
 

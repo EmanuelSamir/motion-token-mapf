@@ -22,14 +22,26 @@ class MotionLMLightningModule(L.LightningModule):
         weight_decay: float = 0.05,
         viz_dir: str = "visualizations",
         loss_type: str = "ce",  # "ce", "focal", or "spatial_ce"
-        focal_gamma: float = 2.0,
+        loss_gamma: float = 5.0,
         smoothing_sigma: float = 0.5,
+        history_noise_std: float = 0.05, # Noise in meters/vel for robustness
+        loss_alpha: float = 0.5,     # Weight for constant velocity token
     ):
         super().__init__()
         self.save_hyperparameters()
         self.model = MotionLM(**model_config)
         self.tokenizer = MotionTokenizer()
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.tokenizer.INVALID_TOKEN)
+        
+        # Create weighted criterion to handle token 84 dominance
+        weights = torch.ones(self.tokenizer.vocab_size + 1)
+        if hasattr(self.hparams, "loss_alpha"):
+            weights[84] = self.hparams.loss_alpha
+        self.register_buffer("class_weights", weights)
+        
+        self.criterion = nn.CrossEntropyLoss(
+            weight=self.class_weights,
+            ignore_index=self.tokenizer.INVALID_TOKEN
+        )
 
         if not os.path.exists(viz_dir):
             os.makedirs(viz_dir, exist_ok=True)
@@ -40,13 +52,62 @@ class MotionLMLightningModule(L.LightningModule):
     def forward(self, history, tokens, agent_ids, time_ids):
         return self.model(history, tokens, agent_ids, time_ids)
 
+    def autoregressive_rollout(self, history):
+        """
+        Full joint autoregressive rollout across all agents and time steps.
+        Args:
+            history: [Batch, N, T_hist, D_feat]
+        Returns:
+            all_tokens: [Batch, N * T_pred] integer tokens
+        """
+        B, N, T_hist, D = history.shape
+        T_pred = self.hparams.model_config["max_timesteps"]
+        
+        # SOS Initialization
+        curr_tokens = torch.full((B, 1), fill_value=84, device=self.device)
+        curr_agent_ids = torch.zeros((B, 1), dtype=torch.long, device=self.device)
+        curr_time_ids = torch.zeros((B, 1), dtype=torch.long, device=self.device)
+        
+        all_rollout_tokens = []
+        
+        mem = self.model.encoder(history)
+        
+        for t in range(T_pred):
+            for n_idx in range(N):
+                # Predict next token
+                logits = self.model.decoder(curr_tokens, mem, curr_agent_ids, curr_time_ids)
+                next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+                
+                all_rollout_tokens.append(next_token)
+                
+                if len(all_rollout_tokens) < N * T_pred:
+                    # Update sequence for next prediction
+                    curr_tokens = torch.cat([curr_tokens, next_token], dim=1)
+                    
+                    next_n = (n_idx + 1) % N
+                    next_t = t + 1 if next_n == 0 else t
+                    
+                    n_id = torch.full((B, 1), fill_value=next_n, dtype=torch.long, device=self.device)
+                    t_id = torch.full((B, 1), fill_value=next_t, dtype=torch.long, device=self.device)
+                    curr_agent_ids = torch.cat([curr_agent_ids, n_id], dim=1)
+                    curr_time_ids = torch.cat([curr_time_ids, t_id], dim=1)
+        
+        return torch.cat(all_rollout_tokens, dim=1) # [B, N*T]
+
     def training_step(self, batch, batch_idx):
         history = batch["history"]
         tokens = batch["tokens"]
         agent_ids = batch["agent_ids"]
         time_ids = batch["time_ids"]
 
-        # Shift tokens for autoregressive teaching (input is t-1)
+        # 1. Noise Injection (Only during training for robustness)
+        if self.hparams.history_noise_std > 0:
+            noise = torch.randn_like(history) * self.hparams.history_noise_std
+            # Apply only to x, y, vx, vy (indices 0:4), not heading or padding
+            history = history.clone()
+            history[:, :, :, :4] += noise[:, :, :, :4]
+
+        # 2. Shift tokens for autoregressive teaching (input is t-1)
         # Use token 84 (Idle/Constant Velocity) as the SOS token instead of 0 (Panic Brake)
         input_tokens = torch.full_like(tokens, fill_value=84)
         input_tokens[:, 1:] = tokens[:, :-1]
@@ -59,10 +120,14 @@ class MotionLMLightningModule(L.LightningModule):
 
         if self.hparams.loss_type == "focal":
             loss = self.focal_loss(
-                logits_flat, targets_flat, gamma=self.hparams.focal_gamma
+                logits_flat, targets_flat, gamma=self.hparams.loss_gamma
             )
         elif self.hparams.loss_type == "spatial_ce":
-            loss = self.spatial_smoothing_loss(logits, tokens)
+            loss = self.spatial_smoothing_loss(
+                logits, tokens, 
+                gamma=self.hparams.loss_gamma,
+                alpha=self.hparams.loss_alpha
+            )
         else:
             loss = self.criterion(logits_flat, targets_flat)
 
@@ -130,10 +195,14 @@ class MotionLMLightningModule(L.LightningModule):
 
         if self.hparams.loss_type == "focal":
             loss = self.focal_loss(
-                logits_flat, targets_flat, gamma=self.hparams.focal_gamma
+                logits_flat, targets_flat, gamma=self.hparams.loss_gamma
             )
         elif self.hparams.loss_type == "spatial_ce":
-            loss = self.spatial_smoothing_loss(logits, tokens)
+            loss = self.spatial_smoothing_loss(
+                logits, tokens, 
+                gamma=self.hparams.loss_gamma,
+                alpha=self.hparams.loss_alpha
+            )
         else:
             loss = self.criterion(logits_flat, targets_flat)
 
@@ -150,6 +219,71 @@ class MotionLMLightningModule(L.LightningModule):
             "val/acc", acc, prog_bar=True, on_epoch=True, batch_size=tokens.size(0)
         )
 
+        # ADE / FDE Calculation (Physical Metrics)
+        ade_list, fde_list = [], []
+        t_gt_coords = batch["gt_future"].cpu().numpy()  # [B, N, T+1, 2]
+        m_mask = batch["m_mask"].cpu().numpy()  # [B, N, T+1]
+        init_deltas = batch["initial_deltas"].cpu().numpy() # [B, N, 2]
+        
+        preds_all = preds.cpu().numpy() # [B, L] 
+        B, N_max = t_gt_coords.shape[0], t_gt_coords.shape[1]
+        L = preds_all.shape[1]
+        T_actual = L // N_max
+
+        for b in range(B):
+            for n in range(N_max):
+                if m_mask[b, n].sum() < 2: continue # Pad agent
+                
+                # Extract predicted tokens for this specific agent (Time-First Interleaving)
+                agent_tokens = [preds_all[b, tt * N_max + n] for tt in range(T_actual)]
+                
+                # Reconstruct
+                start_pos = t_gt_coords[b, n, 0]
+                traj_pred = self.tokenizer.reconstruct_trajectory(
+                    start_pos, agent_tokens, initial_delta=init_deltas[b, n]
+                )
+                
+                # Compare with GT
+                active_steps = int(m_mask[b, n].sum())
+                traj_gt = t_gt_coords[b, n][:active_steps]
+                
+                # Use min length to avoid shape mismatch if pred stopped early
+                min_len = min(len(traj_pred), len(traj_gt))
+                if min_len < 2: continue 
+                
+                # Metrics (Standard ADE: Average of Euclidean Distances)
+                distances = np.sqrt(np.sum((traj_pred[:min_len] - traj_gt[:min_len])**2, axis=1))
+                ade_list.append(np.mean(distances))
+                fde_list.append(distances[-1])
+
+        # --- 2. Autoregressive Rollout (The Real Test) ---
+        rollout_ade_list = []
+        if batch_idx == 0:
+            rollout_tokens = self.autoregressive_rollout(history)
+            rollout_tokens_np = rollout_tokens.cpu().numpy()
+            
+            for b in range(B):
+                for n in range(N_max):
+                    if m_mask[b, n].sum() < 2: continue
+                    
+                    agent_tokens = [rollout_tokens_np[b, tt * N_max + n] for tt in range(T_actual)]
+                    traj_rollout = self.tokenizer.reconstruct_trajectory(
+                        t_gt_coords[b, n, 0], agent_tokens, initial_delta=init_deltas[b, n]
+                    )
+                    
+                    min_len = min(len(traj_rollout), len(t_gt_coords[b, n][m_mask[b, n] > 0]))
+                    if min_len < 2: continue
+                    
+                    dist = np.linalg.norm(traj_rollout[:min_len] - t_gt_coords[b, n][:min_len], axis=1)
+                    rollout_ade_list.append(np.mean(dist))
+
+        # --- 3. Logging ---
+        if ade_list:
+            self.log("val/ADE", np.mean(ade_list), prog_bar=True, on_epoch=True)
+            self.log("val/FDE", np.mean(fde_list), on_epoch=True)
+        if rollout_ade_list:
+            self.log("val/rollout_ADE", np.mean(rollout_ade_list), prog_bar=True, on_epoch=True)
+
         # Visualization check (Randomly pick ~5% of batches per validation cycle)
         if self.trainer.sanity_checking:
             return loss
@@ -160,6 +294,7 @@ class MotionLMLightningModule(L.LightningModule):
             self.visualize_prediction(
                 batch, batch_idx, prefix=f"val_ep{self.current_epoch}"
             )
+            self.log_token_diagnostics(logits, tokens)
 
         return loss
 
@@ -189,32 +324,46 @@ class MotionLMLightningModule(L.LightningModule):
         smoothing_matrix = smoothing_matrix / smoothing_matrix.sum(dim=1, keepdim=True)
         self.register_buffer("spatial_smoothing_matrix", smoothing_matrix)
 
-    def spatial_smoothing_loss(self, logits, targets):
+    def spatial_smoothing_loss(self, logits, targets, gamma=5.0, alpha=0.5):
         """
-        Cross-entropy loss with soft spatial targets.
+        Hyper-Aggressive Spatial Focal Loss.
+        - gamma=5.0: Heavily suppresses easy examples (Gamma).
+        - alpha=0.5: Modestly de-weights the dominant 'constant velocity' token (Alpha).
         """
         import torch.nn.functional as F
-
-        # Flatten time and batch
+        
+        # 1. Flatten time and batch
         logits = logits.reshape(-1, logits.size(-1))
         targets = targets.reshape(-1)
-
-        # Mask valid targets (ignoring padding)
+        
+        # 2. Mask valid targets (ignoring padding)
         valid_mask = targets != self.tokenizer.INVALID_TOKEN
         if not valid_mask.any():
             return logits.sum() * 0.0
-
+            
         valid_logits = logits[valid_mask]
         valid_targets = targets[valid_mask]
-
-        # Get soft targets from the precomputed matrix
-        # [num_valid, 169]
+        
+        # 3. Get soft targets from the precomputed matrix [num_valid, 169]
         soft_targets = self.spatial_smoothing_matrix[valid_targets]
-
-        # Compute Cross Entropy (KL Divergence between soft targets and log-softmax)
-        # Sliced to 169 as the smoothing matrix only covers valid motion tokens 0-168
+        
+        # 4. Compute Log Probabilities (sliced to size of smoothing matrix)
         log_probs = F.log_softmax(valid_logits, dim=-1)[:, :169]
-        return -(soft_targets * log_probs).sum(dim=-1).mean()
+        probs = torch.exp(log_probs)
+        
+        # 5. Compute Cross Entropy against soft targets
+        ce_per_sample = -(soft_targets * log_probs).sum(dim=-1)
+        
+        # 6. Apply Focal Weighting (Gamma)
+        # p_weighted: Integrated probability in the 'correct area'
+        p_weighted = (soft_targets * probs).sum(dim=-1)
+        focal_weight = (1 - p_weighted) ** gamma
+        
+        # 7. Apply Alpha Balancing (Specifically for token 84)
+        alpha_weight = torch.ones_like(ce_per_sample)
+        alpha_weight[valid_targets == 84] = alpha
+        
+        return (focal_weight * alpha_weight * ce_per_sample).mean()
 
     def focal_loss(self, logits, targets, gamma=2.0):
         """
@@ -250,15 +399,13 @@ class MotionLMLightningModule(L.LightningModule):
         N = self.hparams.model_config["max_agents"]
         T = self.hparams.model_config["max_timesteps"]
 
-        # Fast Forward Pass (Teacher Forcing)
-        # Shift tokens like in training_step (SOS = 84)
-        input_tokens = torch.full_like(tokens, fill_value=84)
-        input_tokens[:, 1:] = tokens[:, :-1]
-
+        # Full Autoregressive Rollout for the first sample
         with torch.no_grad():
-            logits = self.model(history, input_tokens, agent_ids, time_ids)
-            # Pick the most likely token for each position
-            pred_tokens_all = logits.argmax(dim=-1)  # [B, N*T]
+            rollout_tokens = self.autoregressive_rollout(history[:1]) # [1, N*T]
+            pred_tokens_all = rollout_tokens.cpu().numpy()
+
+        L = pred_tokens_all.shape[1]
+        T_actual = L // N
 
         # Plot only the first sample of the batch for efficiency
         fig, ax = plt.subplots(figsize=(15, 6))
@@ -286,31 +433,37 @@ class MotionLMLightningModule(L.LightningModule):
                 label=f"Agent {n} GT" if n < 5 else "",
             )
 
-            # Prediction (Teacher Forcing - "One step ahead")
-            # We extract the interleaved tokens for this agent
+            # Prediction (AUTOREGRESSIVE ROLLOUT)
+            # We extract the interleaved tokens for this agent (Time-First)
             agent_pred_tokens = [
-                pred_tokens_all[0, tt * N + n].item() for tt in range(T)
+                pred_tokens_all[0, tt * N + n] for tt in range(T_actual)
             ]
-            agent_gt_tokens = [tokens[0, tt * N + n].item() for tt in range(T)]
-
-            # Calculate per-agent accuracy
-            correct_tokens = sum(
-                1
-                for p, g in zip(agent_pred_tokens, agent_gt_tokens)
-                if p == g and g != self.tokenizer.INVALID_TOKEN
-            )
-            total_tokens = sum(
-                1 for g in agent_gt_tokens if g != self.tokenizer.INVALID_TOKEN
-            )
-            agent_acc = (correct_tokens / total_tokens) * 100 if total_tokens > 0 else 0
-
-            # Reconstruct starting from physical history
-            start_pos = hist_n[-1, :2]
+            
+            # Reconstruct
+            start_pos = t_gt_coords[0, n, 0]
             traj_pred = self.tokenizer.reconstruct_trajectory(
                 start_pos, agent_pred_tokens, initial_delta=init_deltas[0, n]
             )
+            
+            ax.plot(
+                traj_pred[:, 0],
+                traj_pred[:, 1],
+                color=color,
+                marker="o",
+                markersize=4,
+                linestyle="--",
+                linewidth=2,
+                alpha=0.8,
+                label=f"Agent {n} Rollout" if n < 5 else "",
+            )
 
             valid_steps = min(len(traj_pred), int(active_mask.sum()))
+            
+            # Calculate ADE/FDE for this agent
+            distances = np.linalg.norm(traj_pred[:valid_steps] - traj_gt[:valid_steps], axis=1)
+            ade_n = distances.mean()
+            fde_n = distances[-1]
+
             ax.plot(
                 traj_pred[:valid_steps, 0],
                 traj_pred[:valid_steps, 1],
@@ -319,7 +472,7 @@ class MotionLMLightningModule(L.LightningModule):
                 markersize=5,
                 linestyle="--",
                 alpha=0.9,
-                label=f"A{n} Pred ({agent_acc:.0f}%)" if n < 5 else "",
+                label=f"A{n} Pred (Acc:{agent_acc:.0f}%, FDE:{fde_n:.1f}m)" if n < 5 else "",
             )
 
         ax.axhline(
@@ -348,6 +501,75 @@ class MotionLMLightningModule(L.LightningModule):
             f"{prefix}_step{self.global_step}_batch{batch_idx}.png",
         )
         fig.savefig(save_path)
+        plt.close(fig)
+
+    def log_token_diagnostics(self, logits, targets):
+        """
+        Generates 2D heatmaps of predicted vs ground truth tokens (13x13 grid).
+        Logged to Tensorboard as images.
+        """
+        preds = logits.argmax(dim=-1).detach().cpu().numpy().flatten()
+        targets = targets.detach().cpu().numpy().flatten()
+        
+        # Filter out invalid tokens
+        mask = targets != self.tokenizer.INVALID_TOKEN
+        preds = preds[mask]
+        targets = targets[mask]
+        
+        if len(targets) == 0: return
+
+        # Dimensions
+        num_bins = self.tokenizer.num_bins # 13
+        
+        # 1. Confusion Grid (True Positives Distribution)
+        tp_mask = (preds == targets)
+        tp_tokens = targets[tp_mask]
+        
+        tp_grid = np.zeros((num_bins, num_bins))
+        for t in tp_tokens:
+            if t < num_bins * num_bins:
+                ix, iy = t // num_bins, t % num_bins
+                tp_grid[ix, iy] += 1
+        
+        # 2. Error Grid (Where do we fail?)
+        err_mask = (preds != targets)
+        err_tokens = preds[err_mask] # Where the model predicted wrongly
+        
+        err_grid = np.zeros((num_bins, num_bins))
+        for t in err_tokens:
+            if t < num_bins * num_bins:
+                ix, iy = t // num_bins, t % num_bins
+                err_grid[ix, iy] += 1
+
+        # Normalize for visualization
+        tp_grid = tp_grid / (tp_grid.max() + 1e-6)
+        err_grid = err_grid / (err_grid.max() + 1e-6)
+
+        # Apply Log Scale for visibility
+        tp_map_log = np.log10(tp_grid + 1)
+        err_map_log = np.log10(err_grid + 1)
+        
+        # Create Figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        im1 = ax1.imshow(tp_map_log, cmap='viridis', origin='lower')
+        ax1.set_title("True Positives (Log Scale)")
+        ax1.set_xlabel("Delta-Delta Y Index")
+        ax1.set_ylabel("Delta-Delta X Index")
+        plt.colorbar(im1, ax=ax1)
+        
+        im2 = ax2.imshow(err_map_log, cmap='magma', origin='lower')
+        ax2.set_title("Prediction Errors (Log Scale)")
+        ax2.set_xlabel("Delta-Delta Y Index")
+        ax2.set_ylabel("Delta-Delta X Index")
+        plt.colorbar(im2, ax=ax2)
+        
+        plt.tight_layout()
+        
+        # Log to Tensorboard
+        self.logger.experiment.add_figure(
+            "diagnostics/token_heatmaps", fig, global_step=self.global_step
+        )
         plt.close(fig)
 
     def configure_optimizers(self):

@@ -14,5 +14,7 @@ visualizations
 __pycache__/
 *.pyc
 
+
+images
 .env
 checkpoints

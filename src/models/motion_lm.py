@@ -24,7 +24,9 @@ class MotionLM(nn.Module):
         self.encoder = AgentEncoder(
             input_dim=history_dim,
             hidden_size=hidden_size,
-            num_layers=num_encoder_layers
+            num_layers=num_encoder_layers,
+            nhead=num_heads,
+            max_agents=max_agents
         )
         self.decoder = TrajectoryDecoder(
             vocab_size=vocab_size,

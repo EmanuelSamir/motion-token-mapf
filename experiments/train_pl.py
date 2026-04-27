@@ -46,8 +46,10 @@ def train(cfg: DictConfig):
         weight_decay=cfg.model.get("weight_decay", 0.6),
         viz_dir=cfg.get("viz_dir", "visualizations"),
         loss_type=cfg.model.get("loss_type", "ce"),
-        focal_gamma=cfg.model.get("focal_gamma", 2.0),
-        smoothing_sigma=cfg.model.get("smoothing_sigma", 0.5)
+        loss_gamma=cfg.model.get("loss_gamma", 5.0),
+        loss_alpha=cfg.model.get("loss_alpha", 0.5),
+        smoothing_sigma=cfg.model.get("smoothing_sigma", 0.5),
+        history_noise_std=cfg.model.get("history_noise_std", 0.05)
     )
 
     # 3. Init Trainer

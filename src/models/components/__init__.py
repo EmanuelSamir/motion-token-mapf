@@ -3,16 +3,37 @@ import torch.nn as nn
 
 class AgentEncoder(nn.Module):
     """
-    Simplified MLP/Transformer encoder for agent history.
-    Encodes history of (x, y, vx, vy, heading) relative to t=0.
+    100% Attention-based Encoder (Wayformer style).
+    1. Temporal Attention: Learns dynamics for each agent independently.
+    2. Social Attention: Learns interactions across agents.
     """
-    def __init__(self, input_dim=5, hidden_size=256, num_layers=2):
+    def __init__(self, input_dim=5, hidden_size=256, num_layers=2, nhead=8, max_history=20, max_agents=3):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_size = hidden_size
         
-        # Simple GRU for history sequence
-        self.gru = nn.GRU(input_dim, hidden_size, num_layers, batch_first=True)
+        # 0. Initial projection
+        self.input_proj = nn.Linear(input_dim, hidden_size)
+        self.input_norm = nn.LayerNorm(hidden_size)
+        
+        # 1. Temporal & Agent Positional Encodings
+        self.pos_emb = nn.Parameter(torch.zeros(1, max_history, hidden_size))
+        self.agent_emb = nn.Embedding(max_agents, hidden_size)
+        
+        # 2. Temporal Transformer (per agent history)
+        temp_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size, nhead=nhead, dim_feedforward=hidden_size*4,
+            activation="gelu", batch_first=True, dropout=0.1
+        )
+        self.temporal_attention = nn.TransformerEncoder(temp_layer, num_layers=num_layers)
+        
+        # 3. Social Transformer (across agents)
+        social_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size, nhead=nhead, dim_feedforward=hidden_size*4,
+            activation="gelu", batch_first=True, dropout=0.1
+        )
+        self.social_attention = nn.TransformerEncoder(social_layer, num_layers=1)
+        
         self.norm = nn.LayerNorm(hidden_size)
 
     def forward(self, history):
@@ -20,20 +41,64 @@ class AgentEncoder(nn.Module):
         Args:
             history: [Batch, N, T_hist, D_feat]
         Returns:
-            embeddings: [Batch, N, Hidden_Size]
+            embeddings: [Batch, N*T_hist, Hidden_Size] (Full scene history memory)
         """
         B, N, T, D = history.shape
-        # Flatten B, N to process all agents independently in history
-        x = history.reshape(B * N, T, D)
         
-        _, h_n = self.gru(x) # h_n is [num_layers, B*N, hidden_size]
+        # Create masks
+        history_flat = history.reshape(B*N, T, D)
+        # Check for empty sequences (Avoid NaNs in Transformer)
+        time_mask = (history_flat.abs().sum(dim=-1) < 1e-5) # True means padding
+        # SAFETY: Ensure at least one token is visible (the SOS/Start token)
+        time_mask[:, 0] = False 
         
-        # Take the last layer hidden state
-        out = h_n[-1] # [B*N, hidden_size]
-        out = self.norm(out)
+        # 0. Project and add Positional Embeddings
+        x = self.input_proj(history_flat) # [B*N, T, H]
+        x = self.input_norm(x)
         
-        # Reshape back
-        return out.reshape(B, N, self.hidden_size)
+        # Add Time Embeddings
+        x = x + self.pos_emb[:, :T, :]
+        
+        # Add Agent Embeddings
+        # agent_ids for history: [0,0,.., 1,1,..., 2,2,...]
+        agent_ids = torch.arange(N, device=x.device).repeat_interleave(T)
+        agent_ids = agent_ids.unsqueeze(0).expand(B, -1) # [B, N*T]
+        agent_ids_flat = agent_ids.reshape(B*N, T) # [B*N, T]
+        x = x + self.agent_emb(agent_ids_flat)
+        
+        # 1. Temporal Attention (B*N independent temporal sequences)
+        # Each agent processes its own history
+        x = self.temporal_attention(x, src_key_padding_mask=time_mask) # [B*N, T, H]
+        
+        # 2. Reshape back to include Social dimension
+        # x is [B*N, T, H] -> [B, N, T, H]
+        x = x.reshape(B, N, T, self.hidden_size)
+        
+        # 3. Social Interaction (across N agents)
+        # Flatten time and social dimensions to process all steps at once
+        # Shape: [B, N, T, H] -> [B*T, N, H]
+        x_social = x.transpose(1, 2).reshape(B * T, N, self.hidden_size)
+
+        # Better Masking: Sum across the hidden dimension to find active agents
+        # history has shape [B, N, T, D]
+        agent_exists = (history.abs().sum(dim=(2, 3)) > 1e-5) # [B, N]
+        # Repeat mask for all T steps
+        social_padding_mask = ~agent_exists.repeat_interleave(T, dim=0) # [B*T, N]
+        
+        # SAFETY: Ensure at least one agent is visible
+        social_padding_mask[:, 0] = False 
+        
+        x_social = self.social_attention(
+            x_social, 
+            src_key_padding_mask=social_padding_mask
+        ) # [B*T, N, H]
+        
+        # 4. Final memory for decoder: [B, N*T, H]
+        # Reshape back to [B, T, N, H] -> [B, N, T, H]
+        mem = x_social.reshape(B, T, N, self.hidden_size).transpose(1, 2)
+        mem = mem.reshape(B, N * T, self.hidden_size)
+        
+        return self.norm(mem)
 
 class TrajectoryDecoder(nn.Module):
     """
@@ -92,7 +157,7 @@ class TrajectoryDecoder(nn.Module):
         Standard forward pass (used during training).
         Args:
             motion_tokens: [Batch, L]
-            agent_embeddings: [Batch, N, Hidden_Size] (memory)
+            agent_embeddings: [Batch, N*T_hist, Hidden_Size] (Scene memory from Encoder)
             agent_ids: [Batch, L]
             time_ids: [Batch, L]
         """
